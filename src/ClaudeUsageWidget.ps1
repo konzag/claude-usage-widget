@@ -10,6 +10,9 @@
     The widget never refreshes or rewrites credentials: Claude Code does that; the widget resumes on its own
     as soon as the credentials file changes.
     Data files (settings, history, last response, log) live in %LOCALAPPDATA%\ClaudeUsageWidget.
+    Window controls: the minimize button hides the widget to the notification area (a ring icon with the higher
+    of the session / weekly percentages; click it to bring the widget back), the close button exits.
+    Starting the widget again while it runs (Start Menu) brings the running widget back.
 
 .PARAMETER Snapshot
     Render the widget to this PNG path and exit (docs and visual checks). Writes no history or settings.
@@ -55,7 +58,8 @@ Set-StrictMode -Version 2.0
 
 #region Paths, state
 
-$script:AppVersion = '1.0.0'
+$script:AppVersion = '1.1.0'
+$script:WindowTitle = 'Claude usage'
 $script:ScriptPath = $PSCommandPath
 $script:AppDir = Split-Path -Parent $PSCommandPath
 $script:DataDir = Join-Path $env:LOCALAPPDATA 'ClaudeUsageWidget'
@@ -94,6 +98,10 @@ $script:IncGen = 0
 $script:Derived = @{ Key = ''; Hours = $null; Days = $null }
 $script:NextChecksAt = [DateTimeOffset]::UtcNow.AddSeconds(15)
 $script:NextTrimAt = [DateTimeOffset]::UtcNow.AddSeconds(12)
+$script:Tray = $null
+$script:TrayIcon = $null
+$script:TrayIconHandle = [IntPtr]::Zero
+$script:TrayKey = ''
 
 function Write-Log {
     param([string]$Message)
@@ -110,23 +118,17 @@ function Write-Log {
 
 #endregion
 
-#region Single instance, assemblies, native helper
-
-if (-not $script:ReadOnly) {
-    $createdNew = $false
-    $script:Mutex = [System.Threading.Mutex]::new($true, 'Local\ClaudeUsageWidget', [ref]$createdNew)
-    if (-not $createdNew) {
-        Write-Log 'another instance is already running; exiting'
-        exit 0
-    }
-}
+#region Assemblies, native helper, single instance
 
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, System.Xaml, System.Net.Http
 
 if (-not ('CuwNative' -as [type])) {
-    Add-Type -TypeDefinition @'
+    $refs = @([System.Windows.Interop.HwndSource].Assembly.Location, [System.Windows.Threading.Dispatcher].Assembly.Location)
+    Add-Type -ReferencedAssemblies $refs -TypeDefinition @'
 using System;
 using System.Runtime.InteropServices;
+using System.Text;
+using System.Windows.Interop;
 public static class CuwNative {
     [DllImport("user32.dll", EntryPoint = "GetWindowLongPtrW")]
     static extern IntPtr GetWindowLongPtr(IntPtr hWnd, int nIndex);
@@ -136,6 +138,23 @@ public static class CuwNative {
     static extern IntPtr GetCurrentProcess();
     [DllImport("kernel32.dll")]
     static extern bool SetProcessWorkingSetSize(IntPtr process, IntPtr minimum, IntPtr maximum);
+    [DllImport("user32.dll")]
+    public static extern bool DestroyIcon(IntPtr hIcon);
+    delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+    [DllImport("user32.dll")]
+    static extern bool EnumWindows(EnumWindowsProc callback, IntPtr lParam);
+    [DllImport("user32.dll")]
+    static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    static extern int GetWindowText(IntPtr hWnd, StringBuilder text, int maxCount);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    static extern int RegisterWindowMessage(string name);
+    [DllImport("user32.dll")]
+    static extern bool PostMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
+    static readonly int ShowMessage = RegisterWindowMessage("ClaudeUsageWidget.Show");
+    static HwndSourceHook showHook;
+    // Raised on the UI thread when a second start asks the running widget to show itself.
+    public static event EventHandler ShowRequested;
     // Tool window: no Alt+Tab entry, no taskbar button.
     public static void HideFromAltTab(IntPtr hwnd) {
         long ex = GetWindowLongPtr(hwnd, -20).ToInt64();
@@ -146,8 +165,51 @@ public static class CuwNative {
     public static void TrimWorkingSet() {
         SetProcessWorkingSetSize(GetCurrentProcess(), new IntPtr(-1), new IntPtr(-1));
     }
+    // The hook filters in C#, so PowerShell runs only for the one message, not for every window message.
+    public static void ListenForShow(IntPtr hwnd) {
+        HwndSource source = HwndSource.FromHwnd(hwnd);
+        if (source == null) return;
+        showHook = new HwndSourceHook(ShowHook);
+        source.AddHook(showHook);
+    }
+    static IntPtr ShowHook(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled) {
+        if (msg == ShowMessage) {
+            handled = true;
+            EventHandler h = ShowRequested;
+            if (h != null) h(null, EventArgs.Empty);
+        }
+        return IntPtr.Zero;
+    }
+    // Second start: ask the running widget (process id + window title) to show itself, also when it is hidden
+    // in the notification area. Returns the number of windows asked.
+    public static int RequestShow(int pid, string title) {
+        int asked = 0;
+        EnumWindows(delegate (IntPtr hWnd, IntPtr lParam) {
+            uint owner;
+            GetWindowThreadProcessId(hWnd, out owner);
+            if (owner != (uint)pid) return true;
+            StringBuilder sb = new StringBuilder(128);
+            GetWindowText(hWnd, sb, sb.Capacity);
+            if (sb.ToString() == title && PostMessage(hWnd, ShowMessage, IntPtr.Zero, IntPtr.Zero)) asked++;
+            return true;
+        }, IntPtr.Zero);
+        return asked;
+    }
 }
 '@
+}
+
+if (-not $script:ReadOnly) {
+    $createdNew = $false
+    $script:Mutex = [System.Threading.Mutex]::new($true, 'Local\ClaudeUsageWidget', [ref]$createdNew)
+    if (-not $createdNew) {
+        # Started again (Start Menu) while it runs, e.g. hidden in the tray: ask the running widget to show itself.
+        $asked = 0
+        try { foreach ($p in (Get-WidgetProcess)) { $asked += [CuwNative]::RequestShow([int]$p.ProcessId, $script:WindowTitle) } }
+        catch { Write-Log ('asking the running widget to show failed: ' + $_.Exception.Message) }
+        Write-Log ('another instance is already running; asked it to show ({0} window(s)); exiting' -f $asked)
+        exit 0
+    }
 }
 
 try { [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12 } catch { }
@@ -200,6 +262,7 @@ $script:Palettes = @{
         Accent = '#2A78D6'; AccentTrack = '#CDE2FB'; AccentSoft = '#86B6EF'
         Warn = '#FAB219'; WarnTrack = '#FCEBC2'; Crit = '#D03B3B'; CritTrack = '#F6D4D4'
         S1 = '#2A78D6'; S2 = '#EB6834'; S3 = '#1BAF7A'; SOther = '#B9B7B0'
+        CloseHover = '#C42B1C'; CloseInk = '#FFFFFF'
     }
     dark  = @{
         Surface = '#1A1A19'; Hairline = '#24FFFFFF'; Ink = '#F0EFEC'; Ink2 = '#C3C2B7'; Muted = '#A3A198'
@@ -207,6 +270,7 @@ $script:Palettes = @{
         Accent = '#3987E5'; AccentTrack = '#0D366B'; AccentSoft = '#1C5CAB'
         Warn = '#FAB219'; WarnTrack = '#4A3B12'; Crit = '#D03B3B'; CritTrack = '#4C1F1F'
         S1 = '#3987E5'; S2 = '#D95926'; S3 = '#199E70'; SOther = '#5C5B57'
+        CloseHover = '#C42B1C'; CloseInk = '#FFFFFF'
     }
 }
 
@@ -269,6 +333,46 @@ $xaml = @'
         ResizeMode="NoResize" ShowInTaskbar="False" ShowActivated="False"
         UseLayoutRounding="True" SnapsToDevicePixels="True"
         FontFamily="Segoe UI Variable Text, Segoe UI" FontSize="12">
+    <Window.Resources>
+        <Style x:Key="ChromeButton" TargetType="Button">
+            <Setter Property="Width" Value="22"/>
+            <Setter Property="Height" Value="20"/>
+            <Setter Property="Focusable" Value="False"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Foreground" Value="{DynamicResource Ink2}"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="Bg" Background="Transparent" CornerRadius="4">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="Bg" Property="Background" Value="{DynamicResource Hover}"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+        <Style x:Key="CloseChromeButton" TargetType="Button" BasedOn="{StaticResource ChromeButton}">
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="Bg" Background="Transparent" CornerRadius="4">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="Bg" Property="Background" Value="{DynamicResource CloseHover}"/>
+                                <Setter Property="Foreground" Value="{DynamicResource CloseInk}"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+    </Window.Resources>
     <Grid x:Name="Shell" Background="Transparent">
         <Border x:Name="Card" Margin="12" CornerRadius="10" BorderThickness="1" Padding="14,11,14,11"
                 Background="{DynamicResource Surface}" BorderBrush="{DynamicResource Hairline}">
@@ -279,6 +383,8 @@ $xaml = @'
                 <Grid x:Name="Header">
                     <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="Auto"/>
                         <ColumnDefinition Width="Auto"/>
                         <ColumnDefinition Width="Auto"/>
                     </Grid.ColumnDefinitions>
@@ -295,6 +401,12 @@ $xaml = @'
                     <Border x:Name="ToggleButton" Grid.Column="2" Background="Transparent" Cursor="Hand" Padding="6,2,5,2" Margin="2,0,0,0" CornerRadius="4">
                         <TextBlock x:Name="ToggleGlyph" FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" FontSize="10" Text="&#xE70E;" VerticalAlignment="Center" Foreground="{DynamicResource Ink2}"/>
                     </Border>
+                    <Button x:Name="MinButton" Grid.Column="3" Margin="4,0,0,0" Style="{StaticResource ChromeButton}" AutomationProperties.Name="Ελαχιστοποίηση">
+                        <TextBlock FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" FontSize="10" Text="&#xE921;"/>
+                    </Button>
+                    <Button x:Name="CloseButton" Grid.Column="4" Margin="1,0,-2,0" Style="{StaticResource CloseChromeButton}" AutomationProperties.Name="Κλείσιμο">
+                        <TextBlock FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" FontSize="10" Text="&#xE8BB;"/>
+                    </Button>
                 </Grid>
                 <StackPanel x:Name="MainPanel" Margin="0,10,0,0"/>
                 <StackPanel x:Name="DetailPanel"/>
@@ -306,9 +418,11 @@ $xaml = @'
 '@
 
 $script:Window = [Windows.Markup.XamlReader]::Parse($xaml)
-foreach ($n in 'Shell', 'Card', 'PlanText', 'RefreshButton', 'RefreshGlyph', 'UpdatedText', 'ToggleButton', 'ToggleGlyph', 'MainPanel', 'DetailPanel', 'StatusText') {
+foreach ($n in 'Shell', 'Card', 'PlanText', 'RefreshButton', 'RefreshGlyph', 'UpdatedText', 'ToggleButton', 'ToggleGlyph', 'MinButton', 'CloseButton', 'MainPanel', 'DetailPanel', 'StatusText') {
     Set-Variable -Scope Script -Name $n -Value $script:Window.FindName($n)
 }
+# The second-start path finds the running window by this title.
+$script:Window.Title = $script:WindowTitle
 
 #endregion
 
@@ -1069,11 +1183,15 @@ function Invoke-Tick {
         Test-ThemeChange
         Test-DayRollover
     }
-    # Countdowns have minute resolution: redraw on data changes and once per clock minute.
+    # Countdowns have minute resolution: redraw on data changes and once per clock minute. While hidden in the
+    # tray nothing is drawn; only the tray tooltip follows the data (Show-Widget redraws).
     $minute = [int][math]::Floor($nowUtc.ToUnixTimeSeconds() / 60)
-    if ($changed -or $minute -ne $script:LastViewMinute) { Update-View }
+    if ($script:Window.Visibility -ne [System.Windows.Visibility]::Visible) {
+        if ($changed) { Update-Tray }
+    }
+    elseif ($changed -or $minute -ne $script:LastViewMinute) { Update-View }
     if ($nowUtc -ge $script:NextTrimAt) {
-        $script:NextTrimAt = $nowUtc.AddMinutes(30)
+        $script:NextTrimAt = $nowUtc.AddMinutes(10)
         Invoke-MemoryTrim
     }
     # Each tick costs ~1.5 ms in PowerShell: tick every second only while a request is in flight.
@@ -1203,6 +1321,7 @@ function Initialize-Menu {
     Add-MenuEntry $menu (New-MenuItem 'Άνοιγμα claude.ai/settings/usage' { Start-Process 'https://claude.ai/settings/usage' })
     Add-MenuEntry $menu (New-MenuItem 'Άνοιγμα φακέλου δεδομένων' { Start-Process explorer.exe $script:DataDir })
     Add-MenuEntry $menu ([System.Windows.Controls.Separator]::new())
+    Add-MenuEntry $menu (New-MenuItem 'Ελαχιστοποίηση' { Hide-Widget })
     Add-MenuEntry $menu (New-MenuItem 'Έξοδος' { $script:Window.Close() })
     $menu.Add_Opened({
             try {
@@ -1217,6 +1336,122 @@ function Initialize-Menu {
             catch { Write-Log ('menu open: ' + $_.Exception.Message) }
         })
     $script:Card.ContextMenu = $menu
+}
+
+#endregion
+
+#region Minimize to the notification area
+
+function Get-TaskbarTheme {
+    try {
+        $v = [Microsoft.Win32.Registry]::GetValue('HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize', 'SystemUsesLightTheme', 1)
+        if ($null -ne $v -and [int]$v -eq 0) { return 'dark' }
+    }
+    catch { }
+    return 'light'
+}
+
+function Initialize-Tray {
+    # Created on the first minimize: Windows Forms is loaded only when it is needed.
+    if ($null -ne $script:Tray) { return }
+    Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+    $ni = [System.Windows.Forms.NotifyIcon]::new()
+    $ni.Text = $script:WindowTitle
+    $ni.Add_MouseClick({
+            param($s, $e)
+            try { if ($e.Button -eq [System.Windows.Forms.MouseButtons]::Left) { Show-Widget } }
+            catch { Write-Log ('tray click: ' + $_.Exception.Message) }
+        })
+    $menu = [System.Windows.Forms.ContextMenuStrip]::new()
+    [void]$menu.Items.Add('Εμφάνιση', $null, { try { Show-Widget } catch { Write-Log ('tray menu: ' + $_.Exception.Message) } })
+    [void]$menu.Items.Add('Ανανέωση τώρα', $null, { try { Request-Refresh } catch { } })
+    [void]$menu.Items.Add('Έξοδος', $null, { try { $script:Window.Close() } catch { } })
+    $ni.ContextMenuStrip = $menu
+    $script:Tray = $ni
+}
+
+function Set-TrayIcon {
+    # Ring drawn at the notification-area icon size; the previous GDI icon handle is freed after the swap.
+    param($Ring)
+    $size = [System.Windows.Forms.SystemInformation]::SmallIconSize.Width
+    if ($size -lt 16) { $size = 16 }
+    $pal = $script:Palettes[(Get-TaskbarTheme)]
+    $handle = [IntPtr]::Zero
+    $bmp = [System.Drawing.Bitmap]::new($size, $size)
+    try {
+        $g = [System.Drawing.Graphics]::FromImage($bmp)
+        try {
+            $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
+            $g.Clear([System.Drawing.Color]::Transparent)
+            $stroke = [single][math]::Max(2.0, [math]::Round($size * 0.18, 1))
+            $inset = [single]($stroke / 2.0 + 0.5)
+            $d = [single]($size - 2.0 * $inset)
+            $track = [System.Drawing.Pen]::new([System.Drawing.Color]::FromArgb(150, 128, 128, 128), $stroke)
+            try { $g.DrawEllipse($track, $inset, $inset, $d, $d) } finally { $track.Dispose() }
+            if ($Ring.Sweep -gt 0) {
+                $pen = [System.Drawing.Pen]::new([System.Drawing.ColorTranslator]::FromHtml($pal[$Ring.Color]), $stroke)
+                try { $g.DrawArc($pen, $inset, $inset, $d, $d, [single]-90, [single]$Ring.Sweep) } finally { $pen.Dispose() }
+            }
+        }
+        finally { $g.Dispose() }
+        $handle = $bmp.GetHicon()
+    }
+    finally { $bmp.Dispose() }
+    $icon = [System.Drawing.Icon]::FromHandle($handle)
+    $oldIcon = $script:TrayIcon
+    $oldHandle = $script:TrayIconHandle
+    $script:Tray.Icon = $icon
+    $script:TrayIcon = $icon
+    $script:TrayIconHandle = $handle
+    if ($null -ne $oldIcon) { $oldIcon.Dispose() }
+    if ($oldHandle -ne [IntPtr]::Zero) { [void][CuwNative]::DestroyIcon($oldHandle) }
+}
+
+function Update-Tray {
+    param([switch]$Force)
+    if ($null -eq $script:Tray) { return }
+    $text = Format-TrayText -Model $script:Model -Phase $script:State.Phase -Now ([DateTimeOffset]::Now)
+    if ($script:Tray.Text -ne $text) { $script:Tray.Text = $text }
+    $ring = Get-TrayRing -Model $script:Model
+    $key = '{0}|{1}' -f $ring.Key, (Get-TaskbarTheme)
+    if ($Force -or $key -ne $script:TrayKey) {
+        Set-TrayIcon $ring
+        $script:TrayKey = $key
+    }
+}
+
+function Hide-Widget {
+    # To the notification area. Hidden, not minimized: a minimized window without a taskbar button would leave
+    # a stub in the corner of the screen. The tray icon (or a second start) brings it back.
+    if ($script:Window.Visibility -ne [System.Windows.Visibility]::Visible) { return }
+    try {
+        Initialize-Tray
+        Update-Tray -Force
+        $script:Tray.Visible = $true
+    }
+    catch {
+        Write-Log ('tray icon failed, staying on screen: ' + $_.Exception.Message)
+        return
+    }
+    $script:Window.Hide()
+    $script:NextTrimAt = [DateTimeOffset]::UtcNow.AddSeconds(5)
+    Write-Log 'minimized to the notification area'
+}
+
+function Show-Widget {
+    # From the tray icon or a second start; comes to the front without taking the focus. The tray icon goes
+    # away only once the window is back.
+    if ($script:Window.Visibility -ne [System.Windows.Visibility]::Visible -or $script:Window.WindowState -ne [System.Windows.WindowState]::Normal) {
+        if ($script:Window.WindowState -ne [System.Windows.WindowState]::Normal) { $script:Window.WindowState = [System.Windows.WindowState]::Normal }
+        try { Update-View } catch { Write-Log ('redraw on restore failed: ' + $_.Exception.Message) }
+        $script:Window.Show()
+        Write-Log 'restored'
+    }
+    if ($null -ne $script:Tray) { $script:Tray.Visible = $false }
+    if (-not [bool]$script:Settings.topmost) {
+        $script:Window.Topmost = $true
+        $script:Window.Topmost = $false
+    }
 }
 
 #endregion
@@ -1290,13 +1525,16 @@ Set-Theme
 Initialize-Data
 Initialize-Menu
 $script:Window.Topmost = [bool]$script:Settings.topmost
+Set-Tip $script:MinButton 'Ελαχιστοποίηση · επαναφορά από το εικονίδιο δίπλα στο ρολόι'
+Set-Tip $script:CloseButton 'Κλείσιμο'
 
 $script:Window.Add_SourceInitialized({
         try {
             $hwnd = (New-Object System.Windows.Interop.WindowInteropHelper($script:Window)).Handle
             [CuwNative]::HideFromAltTab($hwnd)
+            if (-not $script:ReadOnly) { [CuwNative]::ListenForShow($hwnd) }
         }
-        catch { Write-Log ('tool-window style failed: ' + $_.Exception.Message) }
+        catch { Write-Log ('window setup failed: ' + $_.Exception.Message) }
     })
 $script:Window.Add_Loaded({
         try { if (-not $Snapshot) { Set-WindowPosition } } catch { Write-Log ('position failed: ' + $_.Exception.Message) }
@@ -1319,6 +1557,14 @@ foreach ($btn in @($script:RefreshButton, $script:ToggleButton)) {
     $btn.Add_MouseEnter({ param($s, $e) $s.Background = $script:Brush.Hover })
     $btn.Add_MouseLeave({ param($s, $e) $s.Background = [System.Windows.Media.Brushes]::Transparent })
 }
+$script:MinButton.Add_Click({ try { Hide-Widget } catch { Write-Log ('minimize: ' + $_.Exception.Message) } })
+$script:CloseButton.Add_Click({ try { $script:Window.Close() } catch { } })
+$script:Window.Add_StateChanged({
+        # Minimized by Windows (e.g. a shell command): hide to the tray instead of leaving a corner stub.
+        try { if ($script:Window.WindowState -eq [System.Windows.WindowState]::Minimized) { Hide-Widget } }
+        catch { Write-Log ('window state: ' + $_.Exception.Message) }
+    })
+[CuwNative]::add_ShowRequested({ try { Show-Widget } catch { Write-Log ('show request: ' + $_.Exception.Message) } })
 $script:Window.Dispatcher.Add_UnhandledException({
         param($s, $e)
         Write-Log ('unhandled UI exception: ' + $e.Exception.Message)
@@ -1326,9 +1572,12 @@ $script:Window.Dispatcher.Add_UnhandledException({
     })
 $script:Window.Add_Closed({
         try { $script:Timer.Stop() } catch { }
+        try { if ($null -ne $script:Tray) { $script:Tray.Visible = $false; $script:Tray.Dispose() } } catch { }
+        try { if ($script:TrayIconHandle -ne [IntPtr]::Zero) { [void][CuwNative]::DestroyIcon($script:TrayIconHandle) } } catch { }
         try { $script:Http.Dispose() } catch { }
         try { if ($null -ne $script:Mutex) { $script:Mutex.ReleaseMutex(); $script:Mutex.Dispose() } } catch { }
         Write-Log 'widget closed'
+        if (-not $Snapshot) { try { $script:Window.Dispatcher.InvokeShutdown() } catch { } }
     })
 
 if ($Snapshot) {
@@ -1363,6 +1612,8 @@ $script:Timer.Add_Tick({
         try { Invoke-Tick } catch { Write-Log ('tick failed: ' + $_.Exception.Message) }
     })
 $script:Timer.Start()
-[void]$script:Window.ShowDialog()
+# Show + Dispatcher.Run, not ShowDialog: hiding a modal window ends its loop, and with it the widget.
+$script:Window.Show()
+[System.Windows.Threading.Dispatcher]::Run()
 
 #endregion

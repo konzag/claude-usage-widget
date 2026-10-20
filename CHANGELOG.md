@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.1.0 — 2026-10-20
+
+- Minimize (–) and close (×) buttons in the header; Ελαχιστοποίηση in the context menu.
+- Minimize hides the widget to the notification area: a ring icon with the higher of the session and weekly
+  percentages, a tooltip with both, and a small menu; click the icon to bring the widget back.
+- Starting the widget again (Start Menu) while it runs brings the running widget back instead of doing nothing.
+- Nothing is drawn while minimized; the working set is trimmed every 10 minutes (was 30).
+
 ## 1.0.0 — 2026-10-20
 
 - First version.
