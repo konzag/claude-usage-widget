@@ -380,31 +380,40 @@ function Get-WindowDelta {
     return [math]::Max(0.0, $cur - [double]$PrevValue)
 }
 
+function New-UsageIncrement {
+    # Usage between two consecutive samples, attributed to the later sample's time.
+    # Gap = the samples were far apart (PC off / widget closed), so the time attribution is approximate.
+    param($Prev, $Cur, [double]$GapMinutes = 30)
+    return @{
+        Ts      = $Cur.Ts
+        Session = (Get-WindowDelta -PrevValue $Prev.Session -PrevReset $Prev.SessionReset -CurValue $Cur.Session -CurTs $Cur.Ts)
+        Week    = (Get-WindowDelta -PrevValue $Prev.Week -PrevReset $Prev.WeekReset -CurValue $Cur.Week -CurTs $Cur.Ts)
+        Gap     = (($Cur.Ts - $Prev.Ts).TotalMinutes -gt $GapMinutes)
+    }
+}
+
 function Get-UsageIncrements {
-    # Converts consecutive samples into increments attributed to the later sample's time.
-    # Gap = the two samples were far apart (PC off / widget closed), so the time attribution is approximate.
+    # All increments of a chronological sample list (start-up and pruning only; the widget appends
+    # one New-UsageIncrement per new sample).
     param($Samples, [double]$GapMinutes = 30)
     $out = [System.Collections.Generic.List[object]]::new()
     $prev = $null
     foreach ($s in $Samples) {
-        if ($null -ne $prev) {
-            $gap = ($s.Ts - $prev.Ts).TotalMinutes
-            $out.Add(@{
-                    Ts      = $s.Ts
-                    Session = (Get-WindowDelta -PrevValue $prev.Session -PrevReset $prev.SessionReset -CurValue $s.Session -CurTs $s.Ts)
-                    Week    = (Get-WindowDelta -PrevValue $prev.Week -PrevReset $prev.WeekReset -CurValue $s.Week -CurTs $s.Ts)
-                    Gap     = ($gap -gt $GapMinutes)
-                })
-        }
+        if ($null -ne $prev) { $out.Add((New-UsageIncrement -Prev $prev -Cur $s -GapMinutes $GapMinutes)) }
         $prev = $s
     }
     return , $out
 }
 
 function Get-IncrementSum {
+    # Increments are chronological: scan back from the newest and stop at $Since (cost = window, not history).
     param($Increments, [DateTimeOffset]$Since, [string]$Field)
     $t = 0.0
-    foreach ($inc in $Increments) { if ($inc.Ts -gt $Since) { $t += [double]$inc[$Field] } }
+    for ($i = $Increments.Count - 1; $i -ge 0; $i--) {
+        $inc = $Increments[$i]
+        if ($inc.Ts -le $Since) { break }
+        $t += [double]$inc[$Field]
+    }
     return $t
 }
 
@@ -419,8 +428,9 @@ function Get-HourlyBuckets {
         $start = $first.AddHours($k)
         $buckets.Add(@{ Start = $start; End = $start.AddHours(1); Session = 0.0; Week = 0.0; Samples = 0; HasGap = $false })
     }
-    foreach ($inc in $Increments) {
-        if ($inc.Ts -lt $first) { continue }
+    for ($i = $Increments.Count - 1; $i -ge 0; $i--) {
+        $inc = $Increments[$i]
+        if ($inc.Ts -lt $first) { break }
         $idx = [int][math]::Floor(($inc.Ts - $first).TotalHours)
         if ($idx -lt 0 -or $idx -ge $Hours) { continue }
         $b = $buckets[$idx]
@@ -441,9 +451,11 @@ function Get-DailyBuckets {
     for ($k = 0; $k -lt $Days; $k++) {
         $buckets.Add(@{ Date = $first.AddDays($k); Session = 0.0; Week = 0.0; Samples = 0; HasGap = $false })
     }
-    foreach ($inc in $Increments) {
+    for ($i = $Increments.Count - 1; $i -ge 0; $i--) {
+        $inc = $Increments[$i]
         $idx = ($inc.Ts.ToLocalTime().Date - $first).Days
-        if ($idx -lt 0 -or $idx -ge $Days) { continue }
+        if ($idx -lt 0) { break }
+        if ($idx -ge $Days) { continue }
         $b = $buckets[$idx]
         $b.Session += [double]$inc.Session
         $b.Week += [double]$inc.Week

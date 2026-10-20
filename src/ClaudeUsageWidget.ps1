@@ -32,6 +32,9 @@
 .PARAMETER Scale
     Snapshot scale factor (default 2).
 
+.PARAMETER Benchmark
+    With -Snapshot: time 10 view rebuilds and print the average.
+
 .EXAMPLE
     powershell.exe -NoProfile -STA -File .\ClaudeUsageWidget.ps1 -Snapshot .\shot.png -Demo high
 #>
@@ -43,7 +46,8 @@ param(
     [ValidateSet('hours', 'days')][string]$Chart,
     [switch]$Compact,
     [switch]$Expanded,
-    [double]$Scale = 2
+    [double]$Scale = 2,
+    [switch]$Benchmark
 )
 
 $ErrorActionPreference = 'Stop'
@@ -85,6 +89,11 @@ $script:Brush = @{}
 $script:State = @{ Phase = 'init'; Detail = ''; Failures = 0; NextPollAt = [DateTimeOffset]::UtcNow }
 $script:Mutex = $null
 $script:Timer = $null
+$script:LastViewMinute = -1
+$script:IncGen = 0
+$script:Derived = @{ Key = ''; Hours = $null; Days = $null }
+$script:NextChecksAt = [DateTimeOffset]::UtcNow.AddSeconds(15)
+$script:NextTrimAt = [DateTimeOffset]::UtcNow.AddSeconds(12)
 
 function Write-Log {
     param([string]$Message)
@@ -216,8 +225,9 @@ function Get-EffectiveTheme {
     if ($script:ThemeOverride) { $t = $script:ThemeOverride }
     if ($t -eq 'light' -or $t -eq 'dark') { return $t }
     try {
-        $v = Get-ItemPropertyValue -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize' -Name 'AppsUseLightTheme'
-        if ([int]$v -eq 0) { return 'dark' }
+        # .NET call, not Get-ItemPropertyValue: the registry provider costs tens of ms per call.
+        $v = [Microsoft.Win32.Registry]::GetValue('HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize', 'AppsUseLightTheme', 1)
+        if ($null -ne $v -and [int]$v -eq 0) { return 'dark' }
     }
     catch { }
     return 'light'
@@ -714,8 +724,21 @@ function Get-StatusMessage {
     return ''
 }
 
+function Get-DerivedBuckets {
+    # Chart buckets are rebuilt only when the history changes or the clock hour turns.
+    param([DateTimeOffset]$Now)
+    $key = '{0}|{1}' -f $script:IncGen, $Now.ToLocalTime().ToString('yyyyMMddHH')
+    if ($key -ne $script:Derived.Key) {
+        $script:Derived.Hours = Get-HourlyBuckets -Increments $script:Increments -Now $Now -Hours 24
+        $script:Derived.Days = Get-DailyBuckets -Increments $script:Increments -Now $Now -Days 7
+        $script:Derived.Key = $key
+    }
+    return $script:Derived
+}
+
 function Update-View {
     $now = [DateTimeOffset]::Now
+    $script:LastViewMinute = [int][math]::Floor($now.ToUnixTimeSeconds() / 60)
     $m = $script:Model
     $compact = [bool]$script:Settings.compact
     $script:MainPanel.Children.Clear()
@@ -840,9 +863,8 @@ function Update-View {
             [void]$script:DetailPanel.Children.Add((New-TilesBlock $tiles))
             $mode = [string]$script:Settings.chart
             if ($mode -ne 'days') { $mode = 'hours' }
-            $hb = Get-HourlyBuckets -Increments $script:Increments -Now $now -Hours 24
-            $db = Get-DailyBuckets -Increments $script:Increments -Now $now -Days 7
-            [void]$script:DetailPanel.Children.Add((New-ChartBlock -Mode $mode -HourBuckets $hb -DayBuckets $db))
+            $dv = Get-DerivedBuckets -Now $now
+            [void]$script:DetailPanel.Children.Add((New-ChartBlock -Mode $mode -HourBuckets $dv.Hours -DayBuckets $dv.Days))
         }
     }
 
@@ -924,8 +946,11 @@ function Complete-UsageFetch {
                 [IO.File]::WriteAllText($script:LastPath, $body, $script:Utf8NoBom)
                 $sample = New-UsageSample -Model $model -Ts $nowUtc
                 Add-UsageHistorySample -Path $script:HistoryPath -Sample $sample
+                if ($script:Samples.Count -gt 0) {
+                    $script:Increments.Add((New-UsageIncrement -Prev $script:Samples[$script:Samples.Count - 1] -Cur $sample))
+                }
                 $script:Samples.Add($sample)
-                $script:Increments = Get-UsageIncrements -Samples $script:Samples
+                $script:IncGen++
             }
             if ($script:State.Phase -ne 'ok') { Write-Log 'usage fetch ok' }
             $script:State.Phase = 'ok'
@@ -1003,6 +1028,7 @@ function Test-DayRollover {
         [void](Compress-UsageHistory -Path $script:HistoryPath -KeepSince $keep)
         $script:Samples = Read-UsageHistory -Path $script:HistoryPath -Since $keep
         $script:Increments = Get-UsageIncrements -Samples $script:Samples
+        $script:IncGen++
     }
     catch { Write-Log ('history prune failed: ' + $_.Exception.Message) }
 }
@@ -1037,13 +1063,28 @@ function Invoke-Tick {
         Start-UsageFetch
         $changed = $true
     }
-    if ($script:TickCount % 15 -eq 0) {
+    if ($nowUtc -ge $script:NextChecksAt) {
+        $script:NextChecksAt = $nowUtc.AddSeconds(15)
         Test-CredentialChange
         Test-ThemeChange
         Test-DayRollover
     }
-    if ($changed -or $script:TickCount % 20 -eq 0) { Update-View }
-    if ($script:TickCount -eq 12 -or $script:TickCount % 1800 -eq 0) { Invoke-MemoryTrim }
+    # Countdowns have minute resolution: redraw on data changes and once per clock minute.
+    $minute = [int][math]::Floor($nowUtc.ToUnixTimeSeconds() / 60)
+    if ($changed -or $minute -ne $script:LastViewMinute) { Update-View }
+    if ($nowUtc -ge $script:NextTrimAt) {
+        $script:NextTrimAt = $nowUtc.AddMinutes(30)
+        Invoke-MemoryTrim
+    }
+    # Each tick costs ~1.5 ms in PowerShell: tick every second only while a request is in flight.
+    if ($null -ne $script:FetchTask) { Set-TickInterval 1 } else { Set-TickInterval 5 }
+}
+
+function Set-TickInterval {
+    param([double]$Seconds)
+    if ($null -ne $script:Timer -and $script:Timer.Interval.TotalSeconds -ne $Seconds) {
+        $script:Timer.Interval = [TimeSpan]::FromSeconds($Seconds)
+    }
 }
 
 function Set-WindowPosition {
@@ -1303,6 +1344,11 @@ if ($Snapshot) {
     }
     Update-View
     $script:Window.Dispatcher.Invoke([Action] {}, [System.Windows.Threading.DispatcherPriority]::ContextIdle)
+    if ($Benchmark) {
+        $sw = [Diagnostics.Stopwatch]::StartNew()
+        for ($i = 0; $i -lt 10; $i++) { Update-View; $script:Window.UpdateLayout() }
+        Write-Output ('BENCH update-view avg {0:0} ms (samples {1})' -f ($sw.Elapsed.TotalMilliseconds / 10), $script:Samples.Count)
+    }
     Save-Snapshot -Path $Snapshot
     $script:Window.Close()
     Write-Output ('SNAPSHOT_OK ' + [IO.Path]::GetFullPath($Snapshot) + ' phase=' + $script:State.Phase)
