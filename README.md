@@ -36,10 +36,10 @@ Bars turn amber with a ⚠ from 75 % and red from 90 % (or earlier if the API re
   samples counts from zero. History starts when the widget first runs. Usage while the PC was off is attributed to
   the next sample and marked as such in the tooltip.
 - Footprint: built-in Windows PowerShell 5.1 + WPF, no modules. The widget redraws once a minute (or when data
-  changes), draws nothing while minimized, and wakes every 5 s (every second only while a request is in flight):
-  idle CPU is about 0.04 % of one core. It is a PowerShell + WPF process: private memory is about 170-200 MB; the
-  working set (Task Manager's "Memory") drops to about 20 MB at every trim (12 s after start, then every
-  10 minutes) and grows back in between.
+  changes), draws nothing while minimized, and wakes every 5 s (every second only while a request is in flight).
+  Averaged over 5 minutes (one request, a redraw per minute, a memory trim) it uses about 0.2 % of one CPU core.
+  It is a PowerShell + WPF process: private memory is about 170-200 MB; the working set (Task Manager's "Memory")
+  drops to about 20 MB at every trim (12 s after start, then every 10 minutes) and grows back in between.
 - The endpoint is undocumented and may change. The parser prefers the newer `limits` array and falls back to the
   older `five_hour` / `seven_day` / `seven_day_<model>` fields; unknown fields are ignored.
 
