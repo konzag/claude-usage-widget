@@ -516,6 +516,81 @@ function Format-LongDate {
 
 #endregion
 
+#region Notification area (tray icon shown while the widget is minimized)
+
+$script:TrayNotes = @{
+    expired = 'token έληξε'; unauthorized = 'token 401'; nocreds = 'χωρίς login'; forbidden = '403'
+    offline = 'χωρίς σύνδεση'; ratelimited = '429'; httperror = 'σφάλμα'
+}
+
+function Format-TrayText {
+    # Tooltip of the tray icon. NotifyIcon.Text takes at most 63 characters on .NET Framework, so the
+    # session reset time is dropped first and the text is cut only as a last resort.
+    param($Model, [string]$Phase, [DateTimeOffset]$Now)
+    $note = ''
+    if ($Phase -and $script:TrayNotes.ContainsKey($Phase)) { $note = $script:TrayNotes[$Phase] }
+    $alert = [bool]$note
+    $sess = ''
+    $reset = ''
+    $week = ''
+    if ($null -ne $Model) {
+        $s = $Model.Session
+        if ($null -ne $s) {
+            $sess = 'Session ' + (Format-UsagePercent $s.Percent)
+            if ($null -ne $s.ResetsAt -and $s.ResetsAt -gt $Now) { $reset = 'reset ' + (Format-ResetTime $s.ResetsAt $Now) }
+            if ((Get-UsageLevel -Percent $s.Percent -Severity $s.Severity) -gt 0) { $alert = $true }
+        }
+        $wk = $Model.Week
+        if ($null -ne $wk) {
+            $week = 'Εβδ. ' + (Format-UsagePercent $wk.Percent)
+            if ((Get-UsageLevel -Percent $wk.Percent -Severity $wk.Severity) -gt 0) { $alert = $true }
+        }
+    }
+    $head = 'Claude'
+    if ($alert) { $head = ([string][char]0x26A0) + ' Claude' }
+    $text = ''
+    foreach ($withReset in @($true, $false)) {
+        $parts = [System.Collections.Generic.List[string]]::new()
+        $parts.Add($head)
+        if ($sess) { $parts.Add($sess) }
+        if ($withReset -and $reset) { $parts.Add($reset) }
+        if ($week) { $parts.Add($week) }
+        if ($note) { $parts.Add($note) }
+        if ($parts.Count -eq 1) { $parts.Add('φόρτωση…') }
+        $text = $parts -join ' · '
+        if ($text.Length -le 63) { return $text }
+    }
+    return ($text.Substring(0, 62) + '…')
+}
+
+function Get-TrayRing {
+    # Ring of the tray icon: the higher of the session and weekly percentages (the limit that binds first),
+    # coloured by the worse level. Key changes only when the drawn icon would change.
+    param($Model)
+    $pct = $null
+    $lvl = 0
+    if ($null -ne $Model) {
+        foreach ($lim in @($Model.Session, $Model.Week)) {
+            if ($null -eq $lim) { continue }
+            $p = [double]$lim.Percent
+            if ($null -eq $pct -or $p -gt $pct) { $pct = $p }
+            $lv = Get-UsageLevel -Percent $p -Severity $lim.Severity
+            if ($lv -gt $lvl) { $lvl = $lv }
+        }
+    }
+    if ($null -eq $pct) { return @{ Percent = $null; Sweep = 0.0; Color = 'Accent'; Key = 'none' } }
+    $pct = [math]::Min(100.0, [math]::Max(0.0, $pct))
+    $color = @('Accent', 'Warn', 'Crit')[$lvl]
+    return @{
+        Percent = $pct
+        Sweep   = [math]::Round(3.6 * $pct, 1)
+        Color   = $color
+        Key     = ('{0}|{1}' -f [int][math]::Round($pct, [MidpointRounding]::AwayFromZero), $color)
+    }
+}
+
+#endregion
+
 #region Demo data (screenshots and UI tests; never written to history)
 
 function New-DemoState {

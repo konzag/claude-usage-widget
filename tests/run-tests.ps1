@@ -217,6 +217,32 @@ try {
     Assert-Equal 0 (Get-IncrementSum -Increments $empty -Since $now.AddHours(-1) -Field 'Session') 'sum: empty list'
     Assert-Equal 24 (Get-HourlyBuckets -Increments $empty -Now $now -Hours 24).Count 'hours: empty list'
 
+    # --- Notification area: tooltip text and ring ---
+    $tn = U '2026-10-20T13:00:00Z'
+    $tm = @{ Session = (New-UsageLimit 'session' 'Session' 16 $tn.AddHours(3) 'normal' 5); Week = (New-UsageLimit 'weekly_all' 'Εβδομάδα' 6 $tn.AddDays(6) 'normal' 168) }
+    $warnSign = [string][char]0x26A0
+    Assert-Equal ('Claude · Session 16% · reset {0} · Εβδ. 6%' -f (Format-ResetTime $tm.Session.ResetsAt $tn)) (Format-TrayText -Model $tm -Phase 'ok' -Now $tn) 'tray: normal text'
+    $tt = Format-TrayText -Model $tm -Phase 'expired' -Now $tn
+    Assert-True ($tt.StartsWith($warnSign + ' Claude · Session 16%') -and $tt.EndsWith(' · token έληξε')) 'tray: expired note with warning sign'
+    Assert-Equal 'Claude · φόρτωση…' (Format-TrayText -Model $null -Phase 'init' -Now $tn) 'tray: no data yet'
+    Assert-Equal ($warnSign + ' Claude · χωρίς σύνδεση') (Format-TrayText -Model $null -Phase 'offline' -Now $tn) 'tray: offline without data'
+    $th = @{ Session = (New-UsageLimit 'session' 'Session' 100 $tn.AddDays(2) 'critical' 5); Week = (New-UsageLimit 'weekly_all' 'Εβδομάδα' 100 $tn.AddDays(6) 'critical' 168) }
+    $tt = Format-TrayText -Model $th -Phase 'offline' -Now $tn
+    Assert-True ($tt.Length -le 63) 'tray: long text fits 63 chars'
+    Assert-Equal ($warnSign + ' Claude · Session 100% · Εβδ. 100% · χωρίς σύνδεση') $tt 'tray: reset dropped first when too long'
+    Assert-True ((Format-TrayText -Model (New-DemoState -Scenario 'high' -Now $now).Model -Phase 'ok' -Now $now).Length -le 63) 'tray: demo high fits'
+    $r = Get-TrayRing -Model $tm
+    Assert-Equal 16 $r.Percent 'ring: higher of session and week'
+    Assert-Equal 'Accent' $r.Color 'ring: normal colour'
+    Assert-Equal 57.6 $r.Sweep 'ring: sweep'
+    $r = Get-TrayRing -Model @{ Session = (New-UsageLimit 'session' 'Session' 30 $null '' 5); Week = (New-UsageLimit 'weekly_all' 'Εβδομάδα' 80 $null '' 168) }
+    Assert-Equal 80 $r.Percent 'ring: week binds first'
+    Assert-Equal '80|Warn' $r.Key 'ring: warning key'
+    $r = Get-TrayRing -Model @{ Session = (New-UsageLimit 'session' 'Session' 130 $null '' 5); Week = $null }
+    Assert-Equal 360 $r.Sweep 'ring: clamps at 100%'
+    Assert-Equal 'Crit' $r.Color 'ring: critical colour'
+    Assert-Equal 'none' (Get-TrayRing -Model $null).Key 'ring: no data'
+
     # --- Windows-only integration bits ---
     if ($env:windir) {
         $spec = Get-WidgetLaunchSpec -ScriptPath 'C:\x\ClaudeUsageWidget.ps1'

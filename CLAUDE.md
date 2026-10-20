@@ -34,12 +34,18 @@ comments are English only.
   holds only UI, polling and IO.
 - Never block the UI thread: HTTP goes through `HttpClient.SendAsync` and is collected by the DispatcherTimer
   (1 s while a request is in flight, 5 s otherwise).
+- The window runs with `Show()` + `Dispatcher.Run()`, never `ShowDialog()`: hiding a modal window ends its loop.
+  Minimize means `Hide()` + tray icon, never `WindowState = Minimized` (a minimized window without a taskbar button
+  leaves a stub in the corner of the screen).
+- Tray: `NotifyIcon.Text` takes at most 63 characters (`Format-TrayText` guarantees it); free every `GetHicon`
+  handle with `DestroyIcon`; Windows Forms is loaded only on the first minimize.
 - Keep the idle cost near zero: the tick does comparisons only; redraw on data changes and once per clock minute;
   chart buckets are cached per history generation and hour; never call PowerShell providers (`Get-ItemProperty`,
   `Get-ChildItem`...) on the tick path. Measure with `-Snapshot ... -Demo normal -Benchmark`.
 - Chart and colour rules (dataviz method): blue sequential ramp for meters and history, status amber/red only for
   warning/critical and always with the ⚠ icon, categorical slots 1-3 (validated light and dark) for the breakdown,
-  text never in series colours, 2 px surface gaps between segments.
+  text never in series colours, 2 px surface gaps between segments. The tray ring uses the same levels (amber / red)
+  with the ⚠ in its tooltip; the close button's red hover (#C42B1C) is Windows window chrome, not a status colour.
 - New API fields: add a fixture under `tests/fixtures/` (strip anything personal) and a parsing test first.
 
 ## Architecture
@@ -49,7 +55,10 @@ comments are English only.
   formatting, demo data, launch spec and shortcuts, widget process lookup.
 - `src/ClaudeUsageWidget.ps1` — XAML window (borderless, tool window, DPI-aware via WPF), theme from the Windows
   setting, non-blocking polling with backoff, token-expiry handling (waits for Claude Code to refresh the file),
-  context menu, position memory anchored to the nearer edge, `-Snapshot` / `-Demo` modes.
+  context menu, minimize (hide to a tray ring icon) and close buttons, position memory anchored to the nearer edge,
+  `-Snapshot` / `-Demo` modes. A second start finds the running window (process id + title) and posts it the
+  registered message `ClaudeUsageWidget.Show`, caught by a C# `HwndSource` hook, so PowerShell never runs per
+  window message.
 - `install.ps1` / `uninstall.ps1` — per-user install to `%LOCALAPPDATA%\ClaudeUsageWidget`; shortcuts launch
   `conhost.exe --headless powershell.exe ... -File` so no console window appears even when Windows Terminal is the
   default terminal.
