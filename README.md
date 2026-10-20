@@ -36,7 +36,8 @@ Bars turn amber with a ⚠ from 75 % and red from 90 % (or earlier if the API re
   samples counts from zero. History starts when the widget first runs. Usage while the PC was off is attributed to
   the next sample and marked as such in the tooltip.
 - Footprint: built-in Windows PowerShell 5.1 + WPF, no modules. After start-up the widget trims its working set
-  (about 20 MB) and only redraws every 20 seconds.
+  (about 20-70 MB), redraws once a minute (or when data changes) and wakes every 5 s (every second only while a
+  request is in flight): idle CPU is about 0.04 % of one core.
 - The endpoint is undocumented and may change. The parser prefers the newer `limits` array and falls back to the
   older `five_hour` / `seven_day` / `seven_day_<model>` fields; unknown fields are ignored.
 

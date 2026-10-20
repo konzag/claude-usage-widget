@@ -206,6 +206,16 @@ try {
     $high = New-DemoState -Scenario 'high' -Now $now
     Assert-True ($high.Model.Week.Percent -gt $demo.Model.Week.Percent) 'demo: high uses more'
     Assert-Equal 0 (New-DemoState -Scenario 'empty' -Now $now).Samples.Count 'demo: empty has no history'
+    $incI = [System.Collections.Generic.List[object]]::new()
+    for ($k = 1; $k -lt $demo.Samples.Count; $k++) { $incI.Add((New-UsageIncrement -Prev $demo.Samples[$k - 1] -Cur $demo.Samples[$k])) }
+    Assert-Equal $demoInc.Count $incI.Count 'incremental: same count as batch'
+    Assert-Equal (Get-IncrementSum -Increments $demoInc -Since $now.AddDays(-7) -Field 'Week') (Get-IncrementSum -Increments $incI -Since $now.AddDays(-7) -Field 'Week') 'incremental: same weekly total as batch'
+    $hbI = Get-HourlyBuckets -Increments $incI -Now $now -Hours 24
+    $hbB = Get-HourlyBuckets -Increments $demoInc -Now $now -Hours 24
+    Assert-Equal (($hbB | ForEach-Object { $_.Session }) -join ',') (($hbI | ForEach-Object { $_.Session }) -join ',') 'incremental: same hourly buckets'
+    $empty = [System.Collections.Generic.List[object]]::new()
+    Assert-Equal 0 (Get-IncrementSum -Increments $empty -Since $now.AddHours(-1) -Field 'Session') 'sum: empty list'
+    Assert-Equal 24 (Get-HourlyBuckets -Increments $empty -Now $now -Hours 24).Count 'hours: empty list'
 
     # --- Windows-only integration bits ---
     if ($env:windir) {

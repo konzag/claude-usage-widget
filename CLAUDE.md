@@ -32,7 +32,11 @@ comments are English only.
   StrictMode 2.0 is on: read JSON properties with `Get-JsonProp`.
 - Pure logic lives in `src/UsageCore.psm1` and gets a test in `tests/run-tests.ps1`; `src/ClaudeUsageWidget.ps1`
   holds only UI, polling and IO.
-- Never block the UI thread: HTTP goes through `HttpClient.SendAsync` and is collected by the 1 s DispatcherTimer.
+- Never block the UI thread: HTTP goes through `HttpClient.SendAsync` and is collected by the DispatcherTimer
+  (1 s while a request is in flight, 5 s otherwise).
+- Keep the idle cost near zero: the tick does comparisons only; redraw on data changes and once per clock minute;
+  chart buckets are cached per history generation and hour; never call PowerShell providers (`Get-ItemProperty`,
+  `Get-ChildItem`...) on the tick path. Measure with `-Snapshot ... -Demo normal -Benchmark`.
 - Chart and colour rules (dataviz method): blue sequential ramp for meters and history, status amber/red only for
   warning/critical and always with the ⚠ icon, categorical slots 1-3 (validated light and dark) for the breakdown,
   text never in series colours, 2 px surface gaps between segments.
