@@ -1,0 +1,1 @@
+{"limits":[{"kind":"session","percent":"41","resets_at":null,"severity":"normal"},{"kind":"weekly_all","percent":130,"resets_at":"2026-10-26T14:00:00+00:00","severity":"critical"},{"kind":"monthly_future_kind","percent":-5,"resets_at":null,"scope":null,"new_field":{"x":1}}]}
