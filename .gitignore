@@ -1,0 +1,4 @@
+# Local render / test output
+/out/
+/tests/_out/
+*.log
