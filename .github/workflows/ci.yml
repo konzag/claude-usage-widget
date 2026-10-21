@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Tests (Windows PowerShell 5.1)
+        shell: pwsh
+        run: |
+          $out = @(powershell -NoProfile -ExecutionPolicy Bypass -File tests\run-tests.ps1)
+          $code = $LASTEXITCODE
+          $out | ForEach-Object { Write-Host $_ }
+          if ($code -ne 0 -or $out[-1] -notmatch '^TESTS pass=\d+ fail=0( |$)') { Write-Host '::error::tests failed under powershell'; exit 1 }
+
+      - name: Tests (PowerShell 7)
+        shell: pwsh
+        run: |
+          $out = @(pwsh -NoProfile -File tests\run-tests.ps1)
+          $code = $LASTEXITCODE
+          $out | ForEach-Object { Write-Host $_ }
+          if ($code -ne 0 -or $out[-1] -notmatch '^TESTS pass=\d+ fail=0( |$)') { Write-Host '::error::tests failed under pwsh'; exit 1 }
+
+      - name: Coverage ratchet (MIN_PASS / UNTESTED vs origin/main)
+        shell: pwsh
+        run: pwsh -NoProfile -File tests\check-ratchet.ps1 -BaseRef origin/main

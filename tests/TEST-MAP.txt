@@ -1,0 +1,47 @@
+# Function of src/UsageCore.psm1 -> test group in tests/run-tests.ps1 that covers it, or UNTESTED.
+# The map: group fails when a module function is missing here; CI (tests/check-ratchet.ps1) fails when the
+# number of UNTESTED lines grows compared with origin/main.
+Get-JsonProp -> json
+ConvertTo-Array -> json
+ConvertTo-UsageNumber -> json
+ConvertTo-UsageDate -> date
+Get-RoundedMinute -> round
+Format-IsoUtc -> history line
+Get-LocalMidnight -> midnight
+Get-ClaudeConfigDir -> json
+Read-ClaudeCredential -> cred, secret
+Get-PlanLabel -> plan
+New-UsageLimit -> tray
+ConvertFrom-UsageResponse -> live, legacy, api edge, money
+ConvertFrom-UsageMoney -> money
+Get-UsageLevel -> level
+Get-WindowElapsedFraction -> pace
+Get-DailyAllowance -> allowance
+New-UsageSample -> history line
+Format-HistoryNumber -> history line
+ConvertTo-HistoryLine -> history line
+ConvertFrom-HistoryLine -> history line
+Read-UsageHistory -> history
+Add-UsageHistorySample -> history
+Compress-UsageHistory -> history, prune
+Get-WindowDelta -> delta
+New-UsageIncrement -> incremental
+Get-UsageIncrements -> inc
+Get-IncrementSum -> sum
+Get-HourlyBuckets -> hours
+Get-DailyBuckets -> days
+Get-DayShort -> day
+Get-DayLong -> day
+Format-UsagePercent -> pct
+Format-UsageDelta -> delta fmt
+Format-UsageSpan -> span
+Format-ResetTime -> reset
+Format-LongDate -> day
+Format-TrayText -> tray
+Get-TrayRing -> ring, api edge
+New-DemoState -> demo, tray
+Get-WidgetLaunchSpec -> launch
+New-WidgetShortcut -> launch
+Get-StartupShortcutPath -> launch
+Get-StartMenuShortcutPath -> launch
+Get-WidgetProcess -> UNTESTED
