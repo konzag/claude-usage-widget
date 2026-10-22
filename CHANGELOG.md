@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.1.1 — 2026-10-22
+
+- HTTP 429: the Retry-After delay (seconds or an absolute date) is clamped to 1–60 minutes; a huge or hostile
+  value no longer parks polling (CLAUDE-USAGE-WIDGET-T1). The delay is computed by `Get-RateLimitDelay`.
+- History rows must have exactly 5 columns; rows with extra columns are skipped (CLAUDE-USAGE-WIDGET-T2).
+
 ## 1.1.0 — 2026-10-20
 
 - Minimize (–) and close (×) buttons in the header; Ελαχιστοποίηση in the context menu.
