@@ -292,6 +292,21 @@ function Get-DailyAllowance {
 
 #endregion
 
+#region Polling
+
+function Get-RateLimitDelay {
+    # Delay before the next poll after HTTP 429. Retry-After (delta wins over an absolute date) is honoured but
+    # clamped to [1, 60] minutes so a huge or hostile value cannot park polling; without it the back-off is
+    # 10 min per consecutive failure, capped at 60.
+    param([int]$Failures, $RetryAfterDelta = $null, $RetryAfterDate = $null, [DateTimeOffset]$Now)
+    if ($null -ne $RetryAfterDelta) { $mins = ([TimeSpan]$RetryAfterDelta).TotalMinutes }
+    elseif ($null -ne $RetryAfterDate) { $mins = ([DateTimeOffset]$RetryAfterDate - $Now).TotalMinutes }
+    else { $mins = 10.0 * ($Failures + 1) }
+    return [TimeSpan]::FromMinutes([math]::Min(60.0, [math]::Max(1.0, $mins)))
+}
+
+#endregion
+
 #region History
 
 function New-UsageSample {
@@ -318,7 +333,7 @@ function ConvertFrom-HistoryLine {
     param([string]$Line)
     if ([string]::IsNullOrWhiteSpace($Line)) { return $null }
     $p = $Line.Trim().Split(',')
-    if ($p.Count -lt 5) { return $null }
+    if ($p.Count -ne 5) { return $null }
     $ts = ConvertTo-UsageDate $p[0]
     if ($null -eq $ts) { return $null }
     return @{

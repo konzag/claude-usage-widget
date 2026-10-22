@@ -17,6 +17,7 @@ ConvertFrom-UsageMoney -> money
 Get-UsageLevel -> level
 Get-WindowElapsedFraction -> pace
 Get-DailyAllowance -> allowance
+Get-RateLimitDelay -> retry
 New-UsageSample -> history line
 Format-HistoryNumber -> history line
 ConvertTo-HistoryLine -> history line
