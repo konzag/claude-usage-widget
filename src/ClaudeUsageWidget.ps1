@@ -58,7 +58,7 @@ Set-StrictMode -Version 2.0
 
 #region Paths, state
 
-$script:AppVersion = '1.1.0'
+$script:AppVersion = '1.1.1'
 $script:WindowTitle = 'Claude usage'
 $script:ScriptPath = $PSCommandPath
 $script:AppDir = Split-Path -Parent $PSCommandPath
@@ -1081,9 +1081,11 @@ function Complete-UsageFetch {
             Set-Failure 'forbidden' '403' ([TimeSpan]::FromMinutes(30))
         }
         elseif ($code -eq 429) {
-            $delay = [TimeSpan]::FromMinutes([math]::Min(60, 10 * ([int]$script:State.Failures + 1)))
             $ra = $resp.Headers.RetryAfter
-            if ($null -ne $ra -and $null -ne $ra.Delta) { $delay = [TimeSpan]$ra.Delta }
+            $raDelta = $null
+            $raDate = $null
+            if ($null -ne $ra) { $raDelta = $ra.Delta; $raDate = $ra.Date }
+            $delay = Get-RateLimitDelay -Failures ([int]$script:State.Failures) -RetryAfterDelta $raDelta -RetryAfterDate $raDate -Now ([DateTimeOffset]::UtcNow)
             Write-Log ('HTTP 429, next try in ' + $delay)
             Set-Failure 'ratelimited' '429' $delay
         }

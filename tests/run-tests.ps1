@@ -9,7 +9,7 @@
 #>
 # Coverage ratchet: the run fails when fewer assertions pass. CI (tests/check-ratchet.ps1) refuses a lower
 # value than on origin/main unless the head commit has the trailer "Coverage-Floor-Lowered-By: owner".
-$MIN_PASS = 340
+$MIN_PASS = 355
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version 2.0
 $root = Split-Path -Parent $PSScriptRoot
@@ -418,7 +418,7 @@ try {
         Assert-True ($null -ne $em) 'history line: empty fields parse'
         Assert-True ($null -eq $em.Session -and $null -eq $em.SessionReset -and $null -eq $em.Week -and $null -eq $em.WeekReset) 'history line: empty fields -> null'
         Assert-True ($null -eq (ConvertFrom-HistoryLine '2026-10-14T12:00:00Z,1,,2')) 'history line: 4 columns -> null'
-        Assert-KnownBug ($null -eq (ConvertFrom-HistoryLine '2026-10-14T12:00:00Z,1,,2,,extra')) 'history line: 6 columns -> null' 'APP BUG CLAUDE-USAGE-WIDGET-T2'
+        Assert-True ($null -eq (ConvertFrom-HistoryLine '2026-10-14T12:00:00Z,1,,2,,extra')) 'history line: 6 columns -> null'
         Assert-True ($null -eq (ConvertFrom-HistoryLine '')) 'history line: empty line -> null'
         Assert-Equal '0.33' (Format-HistoryNumber (1.0 / 3.0)) 'history line: two decimals'
         $ns = New-UsageSample -Model @{ Session = (New-UsageLimit 'session' 'Session' 7 $hs.SessionReset '' 5); Week = $null } -Ts $hs.Ts
@@ -461,8 +461,22 @@ try {
         finally { $env:CLAUDE_CONFIG_DIR = $prevCfg }
     }
 
-    # --- retry: a 429 Retry-After delta is used as the next poll delay without an upper bound ---
+    # --- retry: a 429 Retry-After delay is clamped to [1, 60] minutes; the UI uses Get-RateLimitDelay ---
     Invoke-Group 'retry' {
+        $now = U '2026-10-22T12:00:00Z'
+        Assert-Equal 10 (Get-RateLimitDelay -Failures 0 -Now $now).TotalMinutes 'retry: no header -> back-off 10 min'
+        Assert-Equal 60 (Get-RateLimitDelay -Failures 9 -Now $now).TotalMinutes 'retry: no header -> back-off capped at 60 min'
+        Assert-Equal 1 (Get-RateLimitDelay -Failures 0 -RetryAfterDelta ([TimeSpan]::FromSeconds(30)) -Now $now).TotalMinutes 'retry: 30 s -> 1 min floor'
+        Assert-Equal 10 (Get-RateLimitDelay -Failures 3 -RetryAfterDelta ([TimeSpan]::FromMinutes(10)) -Now $now).TotalMinutes 'retry: 10 min delta kept'
+        Assert-Equal 60 (Get-RateLimitDelay -Failures 0 -RetryAfterDelta ([TimeSpan]::FromDays(2)) -Now $now).TotalMinutes 'retry: 2 days -> 60 min'
+        Assert-Equal 60 (Get-RateLimitDelay -Failures 0 -RetryAfterDelta ([TimeSpan]::MaxValue) -Now $now).TotalMinutes 'retry: TimeSpan.MaxValue -> 60 min'
+        Assert-Equal 1 (Get-RateLimitDelay -Failures 0 -RetryAfterDelta ([TimeSpan]::FromMinutes(-5)) -Now $now).TotalMinutes 'retry: negative delta -> 1 min'
+        Assert-Equal 5 (Get-RateLimitDelay -Failures 0 -RetryAfterDate ($now.AddMinutes(5)) -Now $now).TotalMinutes 'retry: absolute date in 5 min'
+        Assert-Equal 60 (Get-RateLimitDelay -Failures 0 -RetryAfterDate ($now.AddDays(3)) -Now $now).TotalMinutes 'retry: absolute date in 3 days -> 60 min'
+        Assert-Equal 1 (Get-RateLimitDelay -Failures 0 -RetryAfterDate ($now.AddMinutes(-5)) -Now $now).TotalMinutes 'retry: absolute date in the past -> 1 min'
+        Assert-Equal 60 (Get-RateLimitDelay -Failures 0 -RetryAfterDate ([DateTimeOffset]::MaxValue) -Now $now).TotalMinutes 'retry: DateTimeOffset.MaxValue -> 60 min'
+        Assert-Equal 2 (Get-RateLimitDelay -Failures 0 -RetryAfterDelta ([TimeSpan]::FromMinutes(2)) -RetryAfterDate ($now.AddMinutes(30)) -Now $now).TotalMinutes 'retry: delta wins over date'
+
         $ra = -1
         $rl = -1
         for ($k = 0; $k -lt $widgetLines.Count; $k++) {
@@ -471,7 +485,7 @@ try {
         }
         Assert-True ($ra -ge 0 -and $rl -gt $ra) 'retry: Retry-After handling found'
         $block = ($widgetLines[$ra..$rl] -join "`n")
-        Assert-KnownBug ($block -match 'Min\(|Clamp|-gt\s|-ge\s|-lt\s|-le\s') 'retry: Retry-After delay is capped' 'APP BUG CLAUDE-USAGE-WIDGET-T1'
+        Assert-True ($block -match 'Get-RateLimitDelay' -and $block -notmatch '\[TimeSpan\]\$ra\.Delta|\$nowUtc') 'retry: Retry-After delay is capped'
     }
 
     # --- tray (P3): every demo scenario fits the 63-character tooltip and warns when a level is raised ---
