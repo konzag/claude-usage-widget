@@ -568,6 +568,15 @@ try {
     }
     else { Skip-Test 'launch' 'not Windows'; Skip-Test 'snapshot' 'not Windows' }
 
+    # --- workflows: CI-NO-CONCURRENCY (owner 2026-11-15) - no concurrency key, so a run never waits "pending" ---
+    # behind a cancelled run's group. The job runs on GitHub-hosted windows-latest (own VM per run).
+    Invoke-Group 'workflows' {
+        $ciYml = [IO.File]::ReadAllText((Join-Path (Join-Path (Join-Path $root '.github') 'workflows') 'ci.yml'), [Text.Encoding]::UTF8)
+        Assert-True (-not [regex]::IsMatch($ciYml, '(?m)^\s*concurrency\s*:')) 'workflows: ci.yml has no concurrency key'
+        $runsOn = @([regex]::Matches($ciYml, '(?m)^\s*runs-on:\s*(\S+)') | ForEach-Object { $_.Groups[1].Value } | Select-Object -Unique)
+        Assert-Equal 'windows-latest' ($runsOn -join ',') 'workflows: ci.yml runs only on GitHub-hosted windows-latest'
+    }
+
     # --- map: every UsageCore function is listed in tests/TEST-MAP.txt ---
     Invoke-Group 'map' {
         $core = [IO.File]::ReadAllText((Join-Path (Join-Path $root 'src') 'UsageCore.psm1'), [Text.Encoding]::UTF8)
