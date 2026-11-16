@@ -9,7 +9,7 @@
 #>
 # Coverage ratchet: the run fails when fewer assertions pass. CI (tests/check-ratchet.ps1) refuses a lower
 # value than on origin/main unless the head commit has the trailer "Coverage-Floor-Lowered-By: owner".
-$MIN_PASS = 355
+$MIN_PASS = 357
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version 2.0
 $root = Split-Path -Parent $PSScriptRoot

@@ -1,0 +1,13 @@
+{
+  "$comment": "K9 template check (tools/k9-check.mjs). kind: app | game. allow: items this repo still lacks, each with the reason; they are report-only (a CI warning) until added, then the entry must go (an entry for an item that exists fails).",
+  "kind": "app",
+  "allow": {
+    "api-tests": "A Windows PowerShell/WPF desktop widget: it serves no HTTP API (it only calls the Anthropic usage endpoint as a client, covered by the fixture tests in tests/run-tests.ps1).",
+    "e2e-playwright": "No browser UI: the window is WPF, so Playwright cannot drive it; the -Snapshot PNG mode is the visual check instead.",
+    "axe-2.2": "No HTML page: axe only scans web pages, and the WPF window is not one.",
+    "visual-baseline": "No committed baseline compared in CI: the -Snapshot mode renders PNGs (docs/widget-*.png are README screenshots), but no test compares them with a stored baseline yet.",
+    "coverage-floor": "PowerShell has no coverage tool here; the ratchet is the test count $MIN_PASS in tests/run-tests.ps1 (357) plus the UNTESTED count in tests/TEST-MAP.txt, checked by tests/check-ratchet.ps1, a format the K9 check does not read.",
+    "el-en-strings": "The UI strings are Greek only (CLAUDE.md); there is no English table or switch.",
+    "health-ready": "A local desktop widget, not a service: nothing listens on a port, so there is no health/ready endpoint to probe."
+  }
+}
